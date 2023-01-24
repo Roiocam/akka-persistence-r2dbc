@@ -31,13 +31,12 @@ import org.slf4j.Logger
 
   object QueryState {
     val empty: QueryState =
-      QueryState(TimestampOffset.Zero, 0, 0, 0, 0, backtrackingCount = 0, TimestampOffset.Zero, Buckets.empty)
+      QueryState(TimestampOffset.Zero, 0, 0, 0, backtrackingCount = 0, TimestampOffset.Zero, Buckets.empty)
   }
 
   final case class QueryState(
       latest: TimestampOffset,
       rowCount: Int,
-      rowCountSinceBacktracking: Long,
       queryCount: Long,
       idleCount: Long,
       backtrackingCount: Int,
@@ -92,7 +91,7 @@ import org.slf4j.Logger
   class Buckets(countByBucket: immutable.SortedMap[Buckets.EpochSeconds, Buckets.Count]) {
     import Buckets.{ Bucket, BucketDurationSeconds, Count, EpochSeconds }
 
-    val createdAt: Instant = InstantFactory.now()
+    val createdAt: Instant = Instant.now()
 
     def findTimeForLimit(from: Instant, atLeastCounts: Int): Option[Instant] = {
       val fromEpochSeconds = from.toEpochMilli / 1000
@@ -259,7 +258,7 @@ import org.slf4j.Logger
 
     Source
       .futureSource[Envelope, NotUsed] {
-        currentTimestamp.map { currentTime =>
+        dao.currentDbTimestamp().map { currentDbTime =>
           if (log.isDebugEnabled())
             log.debugN(
               "{} query slices [{} - {}], from time [{}] until now [{}].",
@@ -286,6 +285,7 @@ import org.slf4j.Logger
       minSlice: Int,
       maxSlice: Int,
       offset: Offset): Source[Envelope, NotUsed] = {
+    // offset 变成基于时间的 offset
     val initialOffset = toTimestampOffset(offset)
 
     if (log.isDebugEnabled())
@@ -297,30 +297,34 @@ import org.slf4j.Logger
         initialOffset.timestamp)
 
     def nextOffset(state: QueryState, envelope: Envelope): QueryState = {
+      // 从事件中提取 offset
       val offset = extractOffset(envelope)
       if (state.backtracking) {
         if (offset.timestamp.isBefore(state.latestBacktracking.timestamp))
           throw new IllegalArgumentException(
             s"Unexpected offset [$offset] before latestBacktracking [${state.latestBacktracking}].")
-
+        // 返回当前 offset
         state.copy(latestBacktracking = offset, rowCount = state.rowCount + 1)
       } else {
         if (offset.timestamp.isBefore(state.latest.timestamp))
           throw new IllegalArgumentException(s"Unexpected offset [$offset] before latest [${state.latest}].")
-
+        // 返回更新 offset 后的 offset
         state.copy(latest = offset, rowCount = state.rowCount + 1)
       }
     }
 
     def delayNextQuery(state: QueryState): Option[FiniteDuration] = {
+      // 如果切换回溯成功, 立即进入
       if (switchFromBacktracking(state)) {
         // switch from from backtracking immediately
         None
       } else {
+        // 否则降频
+        // 调整下一延迟
         val delay = ContinuousQuery.adjustNextDelay(
-          state.rowCount,
-          settings.querySettings.bufferSize,
-          settings.querySettings.refreshInterval)
+          state.rowCount, // 行数
+          settings.querySettings.bufferSize, // 缓冲大小
+          settings.querySettings.refreshInterval) // 刷新频率
 
         if (log.isDebugEnabled)
           delay.foreach { d =>
@@ -338,11 +342,16 @@ import org.slf4j.Logger
     }
 
     def switchFromBacktracking(state: QueryState): Boolean = {
+      // backtrackingCount is for fairness, to not run too many backtracking queries in a row
+      // 回溯计数是未了公平性, 为了不连续运行太多的回溯查询
       state.backtracking && state.rowCount < settings.querySettings.bufferSize - 1
     }
 
     def nextQuery(state: QueryState): (QueryState, Option[Source[Envelope, NotUsed]]) = {
+      // 新的空转数量
       val newIdleCount = if (state.rowCount == 0) state.idleCount + 1 else 0
+      // 新的状态（当前读取时间，最后读取时间）
+      // 如果开启了回溯 && 当前不在回溯过程中 && 查询状态的最后时间戳不等于 0 && (新空转次数 >= 5 || 最后回溯时间和最后时间戳大于半个回溯窗口 )
       val newState =
         if (settings.querySettings.backtrackingEnabled && !state.backtracking && state.latest != TimestampOffset.Zero &&
           (newIdleCount >= 5 ||
@@ -351,17 +360,19 @@ import org.slf4j.Logger
             .between(state.latestBacktracking.timestamp, state.latest.timestamp)
             .compareTo(halfBacktrackingWindow) > 0)) {
           // FIXME config for newIdleCount >= 5 and maybe something like `newIdleCount % 5 == 0`
+          // 切换到回溯状态
 
           // Note that when starting the query with offset = NoOffset it will switch to backtracking immediately after
           // the first normal query because between(latestBacktracking.timestamp, latest.timestamp) > halfBacktrackingWindow
 
           // switching to backtracking
+          // 回溯开始的时间戳(offset)
           val fromOffset =
             if (state.latestBacktracking == TimestampOffset.Zero)
               TimestampOffset.Zero.copy(timestamp = state.latest.timestamp.minus(firstBacktrackingQueryWindow))
             else
               state.latestBacktracking
-
+          // 进入回溯状态
           state.copy(
             rowCount = 0,
             rowCountSinceBacktracking = 0,
@@ -370,6 +381,7 @@ import org.slf4j.Logger
             backtrackingCount = 1,
             latestBacktracking = fromOffset)
         } else if (switchFromBacktracking(state)) {
+          // 从回溯查询中切换回普通状态.
           // switch from backtracking
           state.copy(
             rowCount = 0,
@@ -378,6 +390,7 @@ import org.slf4j.Logger
             idleCount = newIdleCount,
             backtrackingCount = 0)
         } else {
+          // 执行下一次查询, 或者下一次回溯
           // continue
           val newBacktrackingCount = if (state.backtracking) state.backtrackingCount + 1 else 0
           state.copy(
@@ -387,11 +400,11 @@ import org.slf4j.Logger
             idleCount = newIdleCount,
             backtrackingCount = newBacktrackingCount)
         }
-
+      // 截止到当前时间戳.
       val behindCurrentTime =
         if (newState.backtracking) settings.querySettings.backtrackingBehindCurrentTime
         else settings.querySettings.behindCurrentTime
-
+      // 从 from 到 to 时间戳
       val fromTimestamp = newState.nextQueryFromTimestamp
       val toTimestamp = newState.nextQueryToTimestamp(settings.querySettings.bufferSize)
 
@@ -420,6 +433,7 @@ import org.slf4j.Logger
       }
 
       newState ->
+      // 最终调用 dao.rowsBySlices 查询
       Some(
         dao
           .rowsBySlices(
@@ -433,12 +447,13 @@ import org.slf4j.Logger
           .via(deserializeAndAddOffset(newState.currentOffset)))
     }
 
+    // 定义持续查询
     ContinuousQuery[QueryState, Envelope](
-      initialState = QueryState.empty.copy(latest = initialOffset),
-      updateState = nextOffset,
-      delayNextQuery = delayNextQuery,
-      nextQuery = nextQuery,
-      beforeQuery = beforeQuery(logPrefix, entityType, minSlice, maxSlice, _))
+      initialState = QueryState.empty.copy(latest = initialOffset), // 初始化状态：一开始读取的 offset
+      updateState = nextOffset,                                     // 更新状态：状态更新用的方法，递增 offset
+      delayNextQuery = delayNextQuery,                              // 延迟的下一次查询用：调整下一次查询的行数、缓冲大小、刷新时间等
+      nextQuery = nextQuery,                                        // 下次查询：拿到时间戳、更新 queryCount 等，最终使用 dao.rowsBySlices 查询事件
+      beforeQuery = beforeQuery(logPrefix, entityType, minSlice, maxSlice, _))  // 查询之前：这里获取 countBucket 的数量（似乎是这次查询的总数）
   }
 
   private def beforeQuery(

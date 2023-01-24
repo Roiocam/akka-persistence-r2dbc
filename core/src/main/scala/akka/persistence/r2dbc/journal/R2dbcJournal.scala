@@ -164,6 +164,7 @@ private[r2dbc] final class R2dbcJournal(config: Config, cfgPath: String) extends
     }
 
     val persistenceId = messages.head.persistenceId
+    // 异步写入数据库
     val writeResult: Future[Instant] =
       if (messages.size == 1)
         atomicWrite(messages.head)
@@ -173,11 +174,12 @@ private[r2dbc] final class R2dbcJournal(config: Config, cfgPath: String) extends
         val batch = AtomicWrite(messages.flatMap(_.payload))
         atomicWrite(batch)
       }
-
+    // 如果写入成功, 则发布(这里相当于 Java Future 中的 thenApply，没有实际执行)
     val writeAndPublishResult: Future[Done] =
       publish(messages, writeResult)
-
+    // 放入任务队列
     writesInProgress.put(persistenceId, writeAndPublishResult)
+    // 注册回调, 如果成功了, 则发送 WriteFinished 在 writesInProgress 中移除
     writeAndPublishResult.onComplete { _ =>
       self ! WriteFinished(persistenceId, writeAndPublishResult)
     }

@@ -158,9 +158,15 @@ final class R2dbcReadJournal(system: ExtendedActorSystem, config: Config, cfgPat
       minSlice: Int,
       maxSlice: Int,
       offset: Offset): Source[EventEnvelope[Event], NotUsed] = {
+    // 1. 这里隐含了大量代码, 实际上这里是发生数据库查询的地方, 但不是立即查询, 而是一个 Akka Stream 的流形式
     val dbSource = bySlice[Event].liveBySlices("eventsBySlices", entityType, minSlice, maxSlice, offset)
+    // 2. 如果开启了发布事件
     if (settings.journalPublishEvents) {
+      // 2.1 拿到内部 BrokerLess 的 Pub/Sub
       val pubSub = PubSub(typedSystem)
+      // 2.2 定义一个流
+      // 2.2.1 先定义一个 actor, 接收 EventEnvelope
+      // 2.2.2 遍历 Slice, 每个 slice 都组成订阅命令然后发送, 传入上一部的 ActorRef
       val pubSubSource =
         Source
           .actorRef[EventEnvelope[Event]](
@@ -178,6 +184,8 @@ final class R2dbcReadJournal(system: ExtendedActorSystem, config: Config, cfgPat
             val slice = sliceForPersistenceId(env.persistenceId)
             minSlice <= slice && slice <= maxSlice
           }
+      // 2.2 合并 database 查询的流以及 Pub/Sub 订阅的流, 以 Pub/Sub 为 DB  10 倍的优先级合并
+      // 2.3 去重
       dbSource
         .mergePrioritized(pubSubSource, leftPriority = 1, rightPriority = 10)
         .via(
@@ -185,8 +193,10 @@ final class R2dbcReadJournal(system: ExtendedActorSystem, config: Config, cfgPat
             settings.querySettings.backtrackingEnabled,
             JDuration.ofMillis(settings.querySettings.backtrackingWindow.toMillis)))
         .via(deduplicate(settings.querySettings.deduplicateCapacity))
-    } else
+    } else {
+      // 3. 否则直接返回 DB 查询
       dbSource
+    }
   }
 
   /**

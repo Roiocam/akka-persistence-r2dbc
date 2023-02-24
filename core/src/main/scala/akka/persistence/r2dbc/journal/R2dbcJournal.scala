@@ -123,6 +123,7 @@ private[r2dbc] final class R2dbcJournal(config: Config, cfgPath: String) extends
           }
 
           val entityType = PersistenceId.extractEntityType(pr.persistenceId)
+          // 从 persistenceExtension 获取 slice id
           val slice = persistenceExt.sliceForPersistenceId(pr.persistenceId)
 
           val serialized = serialization.serialize(event).get

@@ -53,7 +53,13 @@ import org.slf4j.Logger
       if (backtracking) latestBacktracking.timestamp
       else latest.timestamp
 
+    /**
+     * 下次查询的时间窗口
+     * @param atLeastNumberOfEvents
+     * @return
+     */
     def nextQueryToTimestamp(atLeastNumberOfEvents: Int): Option[Instant] = {
+      // 在 buckets 中查询 Limit 的 Time
       buckets.findTimeForLimit(nextQueryFromTimestamp, atLeastNumberOfEvents) match {
         case Some(t) =>
           if (backtracking)
@@ -61,6 +67,7 @@ import org.slf4j.Logger
           else
             Some(t)
         case None =>
+          // 如果不存在, 返回 null 或者已读取的最大时间.
           if (backtracking) Some(latest.timestamp)
           else None
       }
@@ -94,9 +101,12 @@ import org.slf4j.Logger
     val createdAt: Instant = Instant.now()
 
     def findTimeForLimit(from: Instant, atLeastCounts: Int): Option[Instant] = {
+      // begin 的时间戳
       val fromEpochSeconds = from.toEpochMilli / 1000
+      // 移除事件 == 开始读取的
       val iter = countByBucket.iterator.dropWhile { case (key, _) => fromEpochSeconds >= key }
 
+      //
       @tailrec def sumUntilFilled(key: EpochSeconds, sum: Count): (EpochSeconds, Count) = {
         if (iter.isEmpty || sum >= atLeastCounts)
           key -> sum
@@ -105,8 +115,9 @@ import org.slf4j.Logger
           sumUntilFilled(nextKey, sum + count)
         }
       }
-
+      // 算出每个时间戳内的事件数量
       val (key, sum) = sumUntilFilled(fromEpochSeconds, 0)
+      // 如果 sum >= 最少的数量
       if (sum >= atLeastCounts)
         Some(Instant.ofEpochSecond(key + BucketDurationSeconds))
       else

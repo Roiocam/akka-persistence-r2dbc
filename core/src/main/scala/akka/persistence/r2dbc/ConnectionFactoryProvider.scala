@@ -45,6 +45,11 @@ class ConnectionFactoryProvider(system: ActorSystem[_]) extends Extension {
         .map(_ => Done)
     }
 
+  /**
+   * 创建一个链接工厂
+   * @param configLocation
+   * @return
+   */
   def connectionFactoryFor(configLocation: String): ConnectionFactory = {
     sessions
       .computeIfAbsent(
@@ -57,6 +62,11 @@ class ConnectionFactoryProvider(system: ActorSystem[_]) extends Extension {
       .asInstanceOf[ConnectionFactory]
   }
 
+  /**
+   * 创建一个连接工厂.
+   * @param settings
+   * @return
+   */
   private def createConnectionFactory(settings: ConnectionFactorySettings): ConnectionFactory = {
 
     val builder =
@@ -95,6 +105,11 @@ class ConnectionFactoryProvider(system: ActorSystem[_]) extends Extension {
     ConnectionFactories.get(builder.build())
   }
 
+  /**
+   * 创建一个连接池
+   * @param settings
+   * @return
+   */
   private def createConnectionPoolFactory(settings: ConnectionFactorySettings): ConnectionPool = {
     val connectionFactory = createConnectionFactory(settings)
 

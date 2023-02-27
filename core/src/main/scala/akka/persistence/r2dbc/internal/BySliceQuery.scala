@@ -467,6 +467,15 @@ import org.slf4j.Logger
       beforeQuery = beforeQuery(logPrefix, entityType, minSlice, maxSlice, _))  // 查询之前：这里获取 countBucket 的数量（似乎是这次查询的总数）
   }
 
+  /**
+   * 开启之前
+   * @param logPrefix
+   * @param entityType
+   * @param minSlice
+   * @param maxSlice
+   * @param state
+   * @return
+   */
   private def beforeQuery(
       logPrefix: String,
       entityType: String,
@@ -474,6 +483,7 @@ import org.slf4j.Logger
       maxSlice: Int,
       state: QueryState): Option[Future[QueryState]] = {
     // Don't run this too frequently
+    // 如果 (buckets 为空 | buckets 的创建时间 和当前时间 > 统计 event bucket 的周期)  && (dao.bucket 可能改变(事件下不会) || 在当前 bucket 中找到 limit 为空）
     if ((state.buckets.isEmpty || JDuration
         .between(state.buckets.createdAt, InstantFactory.now())
         .compareTo(eventBucketCountInterval) > 0) &&
@@ -482,7 +492,7 @@ import org.slf4j.Logger
       (dao.countBucketsMayChange || state.buckets
         .findTimeForLimit(state.latest.timestamp, settings.querySettings.bufferSize)
         .isEmpty)) {
-
+      // 起始时间戳, 当前减去 backtrackingWindow 或取上次 backtracking 的时间戳
       val fromTimestamp =
         if (state.latestBacktracking.timestamp == Instant.EPOCH && state.latest.timestamp == Instant.EPOCH)
           Instant.EPOCH
@@ -490,7 +500,7 @@ import org.slf4j.Logger
           state.latest.timestamp.minus(firstBacktrackingQueryWindow)
         else
           state.latestBacktracking.timestamp
-
+      // 执行数据库查询
       val futureState =
         dao.countBuckets(entityType, minSlice, maxSlice, fromTimestamp, Buckets.Limit).map { counts =>
           val newBuckets = state.buckets.clearUntil(fromTimestamp).add(counts)

@@ -106,6 +106,7 @@ final private[r2dbc] class ContinuousQuery[S, T](
           if (nrElements == Long.MaxValue) None
           else delayNextQuery(state)
 
+        // 如果没有 delay 的情况下
         delay match {
           case Some(d) =>
             nrElements = Long.MaxValue
@@ -113,7 +114,8 @@ final private[r2dbc] class ContinuousQuery[S, T](
           case None =>
             nrElements = 0
             subStreamFinished = false
-
+            // 调用一下 beforeQuery 看一下是否需要查询.
+            // 如果需要，在结束后调用 callback
             beforeQuery(state) match {
               case None => runNextQuery()
               case Some(beforeQueryFuture) =>
